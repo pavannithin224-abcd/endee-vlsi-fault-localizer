@@ -83,6 +83,15 @@ Exact lookup collapses to zero at a **single** flipped bit. Endee ANN holds ~100
 4 flips and degrades gracefully to 96% at 32. See `examples/demo.py` for a live
 blind-then-reveal run.
 
+The larger **c880** (dim 1664) is even more robust — the bigger behaviour space separates
+faults further, so ANN stays **99.3% even at 32 flips** while exact lookup is again zero
+past the first bit (`results/noise_recall_c880.png`):
+
+| bit-flips | 0 | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|---|
+| exact lookup (c880) | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| Endee ANN (c880) | 1.00 | 1.00 | 1.00 | 1.00 | 0.99 | 0.99 | 0.99 |
+
 ## 5. Honest analysis of fit
 
 Read this before concluding Endee is doing something magic — it isn't, and saying so is
