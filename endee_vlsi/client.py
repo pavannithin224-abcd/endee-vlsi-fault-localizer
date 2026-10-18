@@ -1,30 +1,23 @@
-"""Endee client helper — loads token from the ENDEE_TOKEN env var (never hard-coded).
+"""Endee client helper — self-hosted Endee server (free Docker image, no login/license).
 
-Set it first (PowerShell):   $env:ENDEE_TOKEN = "your-token"
-or put it in a .env file (git-ignored) and this loads it automatically.
-Get a token: sign in at https://app.endee.io -> create a database -> copy its token.
+Server:  docker run -d --ulimit nofile=100000:100000 -p 8080:8080 \
+           -v endee_data:/data --name endee-server endeeio/endee-server:latest
+IMPORTANT: use a Docker NAMED VOLUME (endee_data), NOT a Windows bind mount — the
+server's LMDB store hangs / fails ("resource temporarily unavailable") on a
+bind-mounted Windows folder over WSL2.
+
+SDK: endee==1.0.0 (v1 index API: create_index / get_index / upsert / query).
+     Newer SDKs (1.2+, 2.x) speak the cloud "collection" API and do NOT match this
+     server. Force http_library="requests" (the httpx/http2 path can hang).
 """
 import os
 
-
-def _load_dotenv():
-    here = os.path.join(os.path.dirname(__file__), "..", ".env")
-    if os.path.exists(here):
-        for line in open(here, encoding="utf-8"):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+BASE_URL = os.environ.get("ENDEE_BASE_URL", "http://localhost:8080/api/v1")
+TOKEN = os.environ.get("ENDEE_TOKEN")  # usually None for the local dev server
 
 
 def get_client():
-    _load_dotenv()
-    token = os.environ.get("ENDEE_TOKEN")
-    if not token:
-        raise SystemExit(
-            "ENDEE_TOKEN not set. Get a token at https://app.endee.io, then either\n"
-            "  set it:   $env:ENDEE_TOKEN = \"...\"   (PowerShell)\n"
-            "  or add a line  ENDEE_TOKEN=...  to the .env file in the project root."
-        )
     from endee import Endee
-    return Endee(token=token)
+    c = Endee(token=TOKEN, http_library="requests")
+    c.set_base_url(BASE_URL)
+    return c

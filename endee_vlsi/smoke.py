@@ -1,30 +1,31 @@
-"""Stage 1 smoke test — prove the full Endee round-trip before building anything real.
+"""Stage 1 smoke test — prove the full Endee round-trip on real signatures.
 
-Encoding here is deliberately MINIMAL (just the 256-bit signature hex -> 256-dim 0/1
-vector). This is NOT the final capture encoding (that's Stage 2); it exists only to
-confirm: create collection -> upsert -> search -> a signature retrieves ITSELF at rank 0.
+Encoding here is MINIMAL (256-bit signature hex -> 256-dim 0/1 vector). NOT the
+final capture encoding (Stage 2); it only proves:
+create_index -> upsert -> query -> a signature retrieves ITSELF at rank 0.
 
 Run:  .venv/Scripts/python.exe endee_vlsi/smoke.py
 """
 import json, os, sys
+sys.path.insert(0, os.path.dirname(__file__))
 from client import get_client
+from endee import Precision
 
-CIRCUIT = "picorv32_cpu"          # smallest (471 sigs)
-COLLECTION = "smoke_picorv32"
-N = 50                             # ingest a small slice for the smoke test
-DIM = 256                          # a signature is 64 hex chars = 256 bits
+CIRCUIT = "picorv32_cpu"      # smallest (471 sigs)
+INDEX = "fl_smoke_picorv32"
+N = 50
+DIM = 256                     # a signature = 64 hex chars = 256 bits
 
 
-def sig_to_vec(hexsig: str):
-    """256-bit signature hex -> list of 256 floats in {0.0, 1.0}."""
+def sig_to_vec(hexsig):
     bits = bin(int(hexsig, 16))[2:].zfill(DIM)
     return [float(b) for b in bits]
 
 
 def load_signatures():
-    data = os.path.join(os.path.dirname(__file__), "..", "data", "signatures.jsonl")
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "signatures.jsonl")
     rows = []
-    for line in open(data, encoding="utf-8"):
+    for line in open(path, encoding="utf-8"):
         r = json.loads(line)
         if r["circuit"] == CIRCUIT:
             rows.append(r)
@@ -34,43 +35,31 @@ def load_signatures():
 
 
 def main():
-    client = get_client()
-    print("health:", client.health())
-
-    # clean slate
+    c = get_client()
     try:
-        client.delete_collection(COLLECTION)
+        c.delete_index(INDEX)
     except Exception:
         pass
-
-    client.create_collection(COLLECTION, fields=[
-        {"name": "sig", "type": "vector",
-         "params": {"dimension": DIM, "space_type": "l2", "precision": "float32"}},
-    ])
-    col = client.get_collection(COLLECTION)
+    c.create_index(name=INDEX, dimension=DIM, space_type="l2", precision=Precision.INT8)
+    idx = c.get_index(name=INDEX)
 
     rows = load_signatures()
-    objects = [{
-        "id": f"{r['circuit']}:{i}",
+    idx.upsert([{
+        "id": f"{CIRCUIT}:{i}",
+        "vector": sig_to_vec(r["signature"]),
         "meta": {"sites": r["sites"], "stuck": r["stuck"]},
         "filter": {"circuit": r["circuit"]},
-        "fields": {"sig": sig_to_vec(r["signature"])},
-    } for i, r in enumerate(rows)]
-    col.upsert(objects)
-    print(f"upserted {len(objects)} signatures")
+    } for i, r in enumerate(rows)])
+    print(f"upserted {len(rows)} signatures")
 
-    # query with signature #7's own vector -> it must come back at rank 0, distance ~0
     probe = rows[7]
-    res = col.search(
-        fields={"sig": {"query": sig_to_vec(probe["signature"]), "limit": 3}},
-        filter=[{"circuit": {"$eq": CIRCUIT}}],
-    )
-    hits = res["results"]["sig"]
-    print("top-3 hits:", [(h["id"], round(h["similarity"], 4)) for h in hits])
+    hits = idx.query(vector=sig_to_vec(probe["signature"]), top_k=3,
+                     filter=[{"circuit": {"$eq": CIRCUIT}}])
+    print("top-3:", [(h["id"], round(h.get("distance", 0), 4)) for h in hits])
 
-    top = hits[0]
-    ok = top["id"] == f"{CIRCUIT}:7"
+    ok = hits and hits[0]["id"] == f"{CIRCUIT}:7"
     print(f"\nEXIT CRITERION — signature retrieves itself at rank 0: {'PASS' if ok else 'FAIL'}")
+    c.delete_index(INDEX)
     sys.exit(0 if ok else 1)
 
 
