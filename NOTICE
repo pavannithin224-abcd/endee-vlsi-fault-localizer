@@ -1,0 +1,14 @@
+endee-vlsi-fault-localizer
+Copyright 2026 Pavan D
+
+This product includes software authored by Pavan D.
+
+The fault-dictionary method and the "Faultiva" / CircuitSage-HMAC deep-learning
+VLSI fault detection and localization system it derives from were designed and
+built from scratch by Pavan D (https://github.com/pavannithin224-abcd). This
+repository is an independent application layered on that idea and is not
+affiliated with or endorsed by Endee (endee.io); it uses Endee as an external
+vector-database component via its public client SDK.
+
+ISCAS-85 benchmark netlists (data/bench/*.bench) are standard public-domain
+test circuits widely distributed for research.
