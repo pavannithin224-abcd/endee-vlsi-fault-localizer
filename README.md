@@ -1,142 +1,149 @@
-# endee-vlsi-fault-localizer
+<div align="center">
 
-**Noise-tolerant VLSI fault localization on the [Endee](https://endee.io) vector database.**
+# Endee VLSI Fault Localizer
 
-Given the response a chip produces under a set of test patterns, find *where* it is
-faulty by retrieving the nearest known fault behaviours from Endee. Unlike exact
-dictionary lookup, approximate retrieval keeps working when the observed response is
-noisy — which exact lookup cannot.
+### Noise-tolerant VLSI fault localization on the [Endee](https://endee.io) vector database
 
-> **Prior work / attribution.** This project builds on the fault-dictionary concept from
-> **Faultiva** (CircuitSage-HMAC) — a deep-learning VLSI fault detection/localization
-> system **designed and built from scratch by Pavan D** ([GitHub](https://github.com/pavannithin224-abcd),
-> [LinkedIn](https://www.linkedin.com/in/pavan-d-96aab62a8)). Faultiva is Pavan's own
-> independent work; this repository is a separate, self-contained application that
-> generalizes its idea onto a vector database. Nothing here was contributed by Endee.
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](requirements.txt)
+[![Vector DB](https://img.shields.io/badge/vector%20db-Endee-2a9d4a.svg)](https://endee.io)
+[![Benchmarks](https://img.shields.io/badge/benchmarks-ISCAS--85-555.svg)](data/bench)
+
+*When a chip's response is noisy, exact fault-dictionary lookup fails — Endee's approximate retrieval still finds the fault.*
+
+![pipeline](assets/pipeline.png)
+
+</div>
+
+---
+
+## TL;DR — the result
+
+Locate a fault from a chip's output behaviour by retrieving the nearest known fault
+behaviours from Endee. The payoff is **noise tolerance**: corrupt the observed response
+and exact dictionary lookup collapses, while Endee's ANN retrieval keeps localizing.
+
+<div align="center">
+
+![noise recall](results/noise_recall_c432.png)
+
+</div>
+
+| bit-flips in observed response | 0 | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|---|
+| **exact dictionary lookup** | 1.00 | **0.00** | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| **Endee ANN retrieval** (c432) | 1.00 | 1.00 | 1.00 | 1.00 | 0.99 | 0.98 | 0.96 |
+| **Endee ANN retrieval** (c880) | 1.00 | 1.00 | 1.00 | 1.00 | 0.99 | 0.99 | 0.99 |
+
+Exact lookup dies at a **single** flipped bit. Endee ANN holds ~96–99% at **32** flips.
+
+```bash
+python examples/demo.py --circuit c432     # blind localization + live noise demo
+```
 
 ---
 
 ## 1. Problem
 
 A classic way to locate a fault in a digital circuit is a **fault dictionary**: simulate
-every candidate fault, record the output **behaviour** it produces under a battery of
-test patterns, and store it. When a real chip misbehaves, you match its observed
-behaviour against the dictionary to find the candidate fault site(s). Faults that produce
-*identical* outputs are physically indistinguishable — so the honest answer is a
-**candidate set**, not a single site.
+every candidate fault, record the **output behaviour** it produces under a battery of test
+patterns, and store it. When a real chip misbehaves, match its observed behaviour against
+the dictionary to find the candidate fault site(s). Faults that produce *identical* outputs
+are physically indistinguishable, so the honest answer is a **candidate set**, not a point.
 
-The weakness: dictionaries are matched **exactly**. If the observed response is even
-slightly corrupted (measurement noise, a partial capture), the exact match fails and the
-method returns *UNKNOWN* — it localizes nothing.
+The weakness: dictionaries are matched **exactly**. If the observed response is slightly
+corrupted (measurement noise, a partial capture), the exact match fails and the method
+returns *UNKNOWN* — it localizes nothing.
 
-## 2. Why this is a retrieval problem
+## 2. Why this is a vector-database problem
 
-A fault dictionary *is* a vector store with payloads: **behaviour vector → candidate
-sites**. Exact lookup is a hashmap. The interesting, and genuinely vector-database-shaped,
-question is **approximate** retrieval: given a *noisy* behaviour, return the nearest known
-fault behaviours. That is exactly what an ANN index does — and it gives noise tolerance
-that exact lookup fundamentally cannot.
+A fault dictionary *is* a vector store with payloads: **behaviour vector → candidate sites**.
+Exact lookup is a hashmap. The genuinely vector-database-shaped question is **approximate**
+retrieval: given a *noisy* behaviour, return the nearest known fault behaviours — which is
+what an ANN index does, and it buys noise tolerance that exact lookup fundamentally cannot.
 
 The vectors must be **locality-preserving** (a small response change = a small vector
-change). We therefore index **raw behaviour** (circuit outputs across test patterns),
-never a hash of it — hashing destroys the locality that makes approximate retrieval
-meaningful.
+change). We therefore index **raw behaviour** (circuit outputs across test patterns), never
+a hash of it — hashing destroys the locality that makes approximate retrieval meaningful.
 
 ## 3. How Endee is used
 
-- **Index** (`endee_vlsi/index.py`): one Endee index per circuit, created with
-  `create_index(dimension=D, space_type="l2", precision=FLOAT32)`.
-- **Objects**: each catalogued fault is one object —
-  `vector` = behaviour bits (outputs × patterns), `meta` = `{net, sa, behaviour}`,
-  `filter` = `{circuit}`.
-- **Retrieval** (`endee_vlsi/localize.py`): `idx.query(vector=..., top_k=24,
-  filter=[{"circuit": {"$eq": circuit}}])`. The server's `similarity` field is the
-  **Hamming distance** for 0/1 vectors (0 = identical behaviour), used directly for
-  EXACT / AMBIGUOUS / nearest decisions.
-- **Verdicts**: `FAULT_FREE` (observed == golden), `EXACT` (one fault, sim 0),
-  `AMBIGUOUS` (several faults share the behaviour — the candidate set), `UNKNOWN`
-  (no exact match; the ANN-nearest fault is surfaced for noisy diagnosis).
+| Step | Endee feature |
+|---|---|
+| one index per circuit | `create_index(dimension=D, space_type="l2", precision=FLOAT32)` |
+| each fault → one object | `vector` = behaviour bits · `meta` = `{net, sa, behaviour}` · `filter` = `{circuit}` |
+| retrieval | `idx.query(vector=..., top_k=24, filter=[{"circuit": {"$eq": c}}])` |
+| metric | server `similarity` field = **Hamming distance** (0 = identical behaviour) |
+| verdicts | `FAULT_FREE` · `EXACT` (sim 0, one fault) · `AMBIGUOUS` (sim 0, candidate set) · `UNKNOWN` (no exact match → ANN-nearest surfaced) |
 
 Runs against a free, self-hosted Endee server (`endeeio/endee-server`, no account) —
-see `docs/RUN_ENDEE.md`.
+see [`docs/RUN_ENDEE.md`](docs/RUN_ENDEE.md).
 
-## 4. Results
+## 4. Results in full
 
-Catalogues are generated by our own stuck-at fault simulator (`endee_vlsi/faultsim.py`)
-on standard ISCAS-85 benchmarks. Every catalogued fault localizes correctly through Endee:
+Catalogues are generated by our own stuck-at fault simulator ([`endee_vlsi/faultsim.py`](endee_vlsi/faultsim.py))
+on standard ISCAS-85 benchmarks. **Every** catalogued fault localizes correctly:
 
-| circuit | stuck-at faults | detected/catalogued | localized correctly | EXACT | AMBIGUOUS | vector dim |
+| circuit | stuck-at faults | detected | localized correctly | EXACT | AMBIGUOUS | vector dim |
 |---|---|---|---|---|---|---|
-| c432 | 392 | 366 | **366/366** | 158 | 208 | 448 |
-| c880 | 886 | 833 | **833/833** | 332 | 501 | 1664 |
+| c432 | 392 | 366 | **366 / 366** | 158 | 208 | 448 |
+| c880 | 886 | 833 | **833 / 833** | 332 | 501 | 1664 |
 
-**The headline — noise tolerance (c432):**
-
-![noise recall](results/noise_recall_c432.png)
-
-| bit-flips in observed response | 0 | 1 | 2 | 4 | 8 | 16 | 32 |
-|---|---|---|---|---|---|---|---|
-| exact dictionary lookup | 1.00 | **0.00** | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
-| Endee ANN retrieval | 1.00 | 1.00 | 1.00 | 1.00 | 0.99 | 0.98 | 0.96 |
-
-Exact lookup collapses to zero at a **single** flipped bit. Endee ANN holds ~100% through
-4 flips and degrades gracefully to 96% at 32. See `examples/demo.py` for a live
-blind-then-reveal run.
-
-The larger **c880** (dim 1664) is even more robust — the bigger behaviour space separates
-faults further, so ANN stays **99.3% even at 32 flips** while exact lookup is again zero
-past the first bit (`results/noise_recall_c880.png`):
-
-| bit-flips | 0 | 1 | 2 | 4 | 8 | 16 | 32 |
-|---|---|---|---|---|---|---|---|
-| exact lookup (c880) | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
-| Endee ANN (c880) | 1.00 | 1.00 | 1.00 | 1.00 | 0.99 | 0.99 | 0.99 |
+Noise-tolerance charts for both circuits are in [`results/`](results).
 
 ## 5. Honest analysis of fit
 
-Read this before concluding Endee is doing something magic — it isn't, and saying so is
-the point.
+Read this before concluding Endee is doing something magic — it isn't, and saying so is the
+point (full version in [`docs/HONEST_LIMITS.md`](docs/HONEST_LIMITS.md)).
 
-- **At this scale a vector DB is not strictly necessary.** These catalogues are hundreds
-  to low-thousands of vectors; a plain in-memory nearest-neighbour scan would also work.
-  Any vector DB (Endee, FAISS, Qdrant) is, strictly, more than the raw size demands.
-- **Graceful degradation is an ANN-general property**, not an Endee-specific one. The same
-  curve would appear on any ANN backend. What the chart proves is the **paradigm**
-  (approximate ≫ exact for noisy diagnosis), validated on a real circuit.
-- **Where this becomes a genuinely Endee-shaped problem:** at **scale** — a full chip
-  *family* or a fab's historical fault corpus is millions-to-billions of behaviour
-  vectors, Endee's single-node billion-vector regime where exact dictionaries and generic
-  libraries fall over — and at the **edge**, offline/air-gapped tester-side diagnosis with
-  no cloud round-trip (Endee's on-device story). This project is the honest first step
-  toward that regime.
+- **At this scale a vector DB is not strictly necessary** — hundreds-to-thousands of
+  vectors; an in-memory scan would also work. Any vector DB is more than the raw size needs.
+- **Graceful degradation is an ANN-general property**, not Endee-specific; the same curve
+  would appear on FAISS/Qdrant. The chart validates the **paradigm**, not a unique feature.
+- **Where this becomes genuinely Endee-shaped:** at **scale** (a chip *family* / fab fault
+  corpus = millions–billions of behaviour vectors, Endee's single-node billion-vector
+  regime) and at the **edge** (offline/air-gapped tester-side diagnosis, no cloud round-trip).
+  This project is the honest first step toward that regime.
 
-## 6. Setup & run
+## 6. Quickstart
 
 ```bash
-# 1. Python deps
-python -m venv .venv && . .venv/Scripts/activate       # Windows: .venv\Scripts\activate
+# 1. deps
+python -m venv .venv && . .venv/Scripts/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 2. Start the free self-hosted Endee server (Docker) — see docs/RUN_ENDEE.md
+# 2. start the free self-hosted Endee server (Docker) — details in docs/RUN_ENDEE.md
 docker run -d --ulimit nofile=100000:100000 -p 8080:8080 \
   -v endee_data:/data --name endee-server endeeio/endee-server:latest
 
-# 3. Build a fault catalogue, then localize / reproduce the chart
+# 3. build a catalogue, validate localization, see the noise demo, reproduce the chart
 python endee_vlsi/build_catalogue.py c432 --patterns 64
-python endee_vlsi/localize.py c432            # validate: every fault localizes
-python examples/demo.py --circuit c432        # blind demo + noise tolerance
-python endee_vlsi/noise_experiment.py c432    # regenerate results/noise_recall_c432.png
+python endee_vlsi/localize.py c432
+python examples/demo.py --circuit c432
+python endee_vlsi/noise_experiment.py c432
 ```
 
-## Layout
+## 7. Layout
+
 ```
 endee_vlsi/   faultsim.py  build_catalogue.py  index.py  localize.py  noise_experiment.py  client.py
 examples/     demo.py
-data/         bench/*.bench  catalogue_*.jsonl  golden_*.json
+data/         bench/*.bench   catalogue_*.jsonl   golden_*.json
 results/      noise_recall_*.png / .json
-docs/         RUN_ENDEE.md  HONEST_LIMITS.md
+docs/         RUN_ENDEE.md   HONEST_LIMITS.md
 ```
 
-## License
-Apache-2.0. See `LICENSE` and `NOTICE`. Faultiva and the method it embodies are the
-original work of Pavan D.
+---
+
+## Author & attribution
+
+Built by **Pavan D** — [GitHub](https://github.com/pavannithin224-abcd) ·
+[LinkedIn](https://www.linkedin.com/in/pavan-d-96aab62a8).
+
+This project builds on the fault-dictionary concept from **Faultiva** (CircuitSage-HMAC), a
+deep-learning VLSI fault detection/localization system **designed and built from scratch by
+Pavan D**. Faultiva is his own independent work; this repository is a separate, self-contained
+application that generalizes its idea onto a vector database. It is not affiliated with or
+endorsed by Endee, and uses Endee only as an external vector-database component via its public SDK.
+
+Licensed under **Apache-2.0** — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
